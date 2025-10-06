@@ -1,4 +1,4 @@
-# app.py — Branch Recon (Our book wording + URL or file upload) — Tolerance fixed at ±5 SAR
+# app.py — Branch Recon (Our book wording + URL or file upload)
 import io, re, os, tempfile, requests
 import pandas as pd, numpy as np
 from datetime import datetime
@@ -7,7 +7,7 @@ import streamlit as st
 
 # ===== CONFIG =====
 ROUND_DP = 2
-AMOUNT_TOLERANCE_DEFAULT = 5.0   # ← fixed ±5 SAR
+AMOUNT_TOLERANCE_DEFAULT = 5.0   # ← changed to ±5 SAR (only change)
 NAME_SIM_THRESHOLD_DEFAULT = 0.80
 
 # -------------------- PAGE / BRANDING --------------------
@@ -81,7 +81,7 @@ def extract_refs_all(voucher: str, description: str):
         nums += re.findall(r"\d{5,}", tok)
 
     latin_names  = re.findall(r"[A-Za-z]{3,}", text)
-    arabic_names = re.findall(r"[\u0600-\u06FF]{2,}", text)   # ✅ pass 'text'
+    arabic_names = re.findall(r"[\u0600-\u06FF]{2,}", text)   # ✅ FIXED: pass 'text'
 
     num_set   = set(nums)
     alnum_set = {t.upper() for t in alnums if t.upper() not in STOP_TOKENS_LATIN}
@@ -238,6 +238,7 @@ def pair_exact_best(left, right, labelL, labelR, tol, name_thresh=NAME_SIM_THRES
     return match_df, usedL, usedR
 
 # ---------- FAST (same-result) wrapper ----------
+# Pre-filter candidates by amount window BEFORE the same scoring logic.
 def pair_exact_best_fast_same(left, right, labelL, labelR, tol, name_thresh=NAME_SIM_THRESHOLD_DEFAULT):
     right_amt = right["Amt"].astype(float).values
 
@@ -247,7 +248,7 @@ def pair_exact_best_fast_same(left, right, labelL, labelR, tol, name_thresh=NAME
 
     usedL, usedR, matched = set(), set(), []
 
-    # ref index (to prioritize)
+    # also build ref index like original (for prioritizing candidates)
     ref_index = {}
     for j, r in right.iterrows():
         toks = r["AllRefs"]
@@ -282,7 +283,7 @@ def pair_exact_best_fast_same(left, right, labelL, labelR, tol, name_thresh=NAME
 
         cands = sorted(cands, key=score)
         for j in cands:
-            if i in usedL or j in usedR:
+            if i in usedL or j in usedR): 
                 continue
             r = right.loc[j]
             num_ov = len(l["NumRefs"]   & r["NumRefs"])
@@ -430,7 +431,7 @@ with st.sidebar:
 
     our_sheet     = st.text_input("Our book sheet name", value="Our book")
     branch_sheet  = st.text_input("Branch book sheet name (blank = auto)", value="Branch book")
-    st.info("Amount tolerance fixed at ± 5 SAR")  # ← replaces number_input
+    amount_tol    = st.number_input("Amount tolerance (SAR)", value=float(AMOUNT_TOLERANCE_DEFAULT), step=0.01, min_value=0.0)
     name_thresh   = st.slider("Name-only similarity threshold", 0.0, 1.0, float(NAME_SIM_THRESHOLD_DEFAULT), 0.05)
 
 source = st.radio("Choose input method", ["Upload file", "From URL (Drive/Sheets/OneDrive/SharePoint)"], horizontal=True)
@@ -459,7 +460,7 @@ if run_btn:
                 file_bytes = uploaded.read()
 
             matching_df, unmatching_df, out_xlsx = run_recon_cached(
-                file_bytes, our_sheet, branch_sheet, AMOUNT_TOLERANCE_DEFAULT, name_thresh, use_fast
+                file_bytes, our_sheet, branch_sheet, amount_tol, name_thresh, use_fast
             )
 
         st.success("Done!")

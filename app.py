@@ -1,4 +1,4 @@
-# app.py — Branch Recon (Our book wording + URL or file upload)
+# app.py — Branch Recon (Our book wording + URL or file upload) — Tolerance fixed at ±5 SAR
 import io, re, os, tempfile, requests
 import pandas as pd, numpy as np
 from datetime import datetime
@@ -7,7 +7,7 @@ import streamlit as st
 
 # ===== CONFIG =====
 ROUND_DP = 2
-AMOUNT_TOLERANCE_DEFAULT = 5.0   # ← changed to ±5 SAR (only change)
+AMOUNT_TOLERANCE_DEFAULT = 5.0   # ← fixed ±5 SAR
 NAME_SIM_THRESHOLD_DEFAULT = 0.80
 
 # -------------------- PAGE / BRANDING --------------------
@@ -19,7 +19,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 st.sidebar.markdown("### 🏢 Issam Kabbani and Partners Unitech")
-#st.sidebar.markdown("**Created by:** Jaseer Pykarathodi  \n**Dept:** Treasury Officer")
+# st.sidebar.markdown("**Created by:** Jaseer Pykarathodi  \n**Dept:** Treasury Officer")
 
 def _footer():
     st.markdown("""
@@ -79,10 +79,8 @@ def extract_refs_all(voucher: str, description: str):
     alnums = re.findall(r"[A-Za-z0-9][A-Za-z0-9_\-/:]{3,}", text)
     for tok in alnums:
         nums += re.findall(r"\d{5,}", tok)
-
     latin_names  = re.findall(r"[A-Za-z]{3,}", text)
-    arabic_names = re.findall(r"[\u0600-\u06FF]{2,}", text)   # ✅ FIXED: pass 'text'
-
+    arabic_names = re.findall(r"[\u0600-\u06FF]{2,}", text)
     num_set   = set(nums)
     alnum_set = {t.upper() for t in alnums if t.upper() not in STOP_TOKENS_LATIN}
     name_set  = {t.upper() for t in latin_names if t.upper() not in STOP_TOKENS_LATIN}
@@ -190,7 +188,7 @@ def pair_exact_best(left, right, labelL, labelR, tol, name_thresh=NAME_SIM_THRES
         cand = set()
         for tok in toks:
             cand |= ref_index.get(tok, set())
-        return list(cand if cand else range(len(right)))
+        return list(cand if candset := cand else range(len(right)))
 
     usedL, usedR, matched = set(), set(), []
     for i, l in left.iterrows():
@@ -210,7 +208,8 @@ def pair_exact_best(left, right, labelL, labelR, tol, name_thresh=NAME_SIM_THRES
 
         cands = sorted(cands, key=score)
         for j in cands:
-            if i in usedL or j in usedR: continue
+            if i in usedL or j in usedR:
+                continue
             r = right.loc[j]
             num_ov = len(l["NumRefs"]   & r["NumRefs"])
             tok_ov = len(l["AlnumRefs"] & r["AlnumRefs"])
@@ -238,7 +237,6 @@ def pair_exact_best(left, right, labelL, labelR, tol, name_thresh=NAME_SIM_THRES
     return match_df, usedL, usedR
 
 # ---------- FAST (same-result) wrapper ----------
-# Pre-filter candidates by amount window BEFORE the same scoring logic.
 def pair_exact_best_fast_same(left, right, labelL, labelR, tol, name_thresh=NAME_SIM_THRESHOLD_DEFAULT):
     right_amt = right["Amt"].astype(float).values
 
@@ -283,7 +281,7 @@ def pair_exact_best_fast_same(left, right, labelL, labelR, tol, name_thresh=NAME
 
         cands = sorted(cands, key=score)
         for j in cands:
-            if i in usedL or j in usedR): 
+            if i in usedL or j in usedR:
                 continue
             r = right.loc[j]
             num_ov = len(l["NumRefs"]   & r["NumRefs"])
@@ -425,13 +423,12 @@ def download_to_temp(url: str) -> str:
 st.title("🔗 BRANCH RECON — Best-overlap Matcher")
 
 with st.sidebar:
-    # Mode selector (Fast = same result, just faster)
     mode = st.radio("Match mode", ["Exact (original)", "Fast (same result)"], index=0, horizontal=False)
     use_fast = mode.startswith("Fast")
 
     our_sheet     = st.text_input("Our book sheet name", value="Our book")
     branch_sheet  = st.text_input("Branch book sheet name (blank = auto)", value="Branch book")
-    amount_tol    = st.number_input("Amount tolerance (SAR)", value=float(AMOUNT_TOLERANCE_DEFAULT), step=0.01, min_value=0.0)
+    st.info("Amount tolerance fixed at ± 5 SAR")  # ← no number_input
     name_thresh   = st.slider("Name-only similarity threshold", 0.0, 1.0, float(NAME_SIM_THRESHOLD_DEFAULT), 0.05)
 
 source = st.radio("Choose input method", ["Upload file", "From URL (Drive/Sheets/OneDrive/SharePoint)"], horizontal=True)
@@ -460,7 +457,7 @@ if run_btn:
                 file_bytes = uploaded.read()
 
             matching_df, unmatching_df, out_xlsx = run_recon_cached(
-                file_bytes, our_sheet, branch_sheet, amount_tol, name_thresh, use_fast
+                file_bytes, our_sheet, branch_sheet, AMOUNT_TOLERANCE_DEFAULT, name_thresh, use_fast
             )
 
         st.success("Done!")

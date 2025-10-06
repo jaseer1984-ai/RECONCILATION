@@ -7,7 +7,7 @@ import streamlit as st
 
 # ===== CONFIG =====
 ROUND_DP = 2
-AMOUNT_TOLERANCE_DEFAULT = 5.0   # ← fixed ±5 SAR
+AMOUNT_TOLERANCE_DEFAULT = 5.0  # fixed ±5 SAR
 NAME_SIM_THRESHOLD_DEFAULT = 0.80
 
 # -------------------- PAGE / BRANDING --------------------
@@ -151,8 +151,7 @@ def _find_by_alias(target, names):
     if not target: return None
     t = _casefold(target)
     for n in names:
-        if _eq(n, target):   # exact
-            return n
+        if _eq(n, target): return n
     if t in OUR_ALIASES:
         for n in names:
             if _casefold(n) in OUR_ALIASES: return n
@@ -188,18 +187,19 @@ def pair_exact_best(left, right, labelL, labelR, tol, name_thresh=NAME_SIM_THRES
         cand = set()
         for tok in toks:
             cand |= ref_index.get(tok, set())
-        return list(cand if candset := cand else range(len(right)))
+        return list(cand) if cand else list(range(len(right)))
 
     usedL, usedR, matched = set(), set(), []
     for i, l in left.iterrows():
         cands = candidates(l)
-        if not cands: continue
+        if not cands:
+            continue
 
         def score(j):
             r = right.loc[j]
-            num_ov = len(l["NumRefs"]   & r["NumRefs"])
+            num_ov = len(l["NumRefs"] & r["NumRefs"])
             aln_ov = len(l["AlnumRefs"] & r["AlnumRefs"])
-            nm_ov  = len(l["NameRefs"]  & r["NameRefs"])
+            nm_ov  = len(l["NameRefs"] & r["NameRefs"])
             nm_sim = name_similarity(l["NameRefs"], r["NameRefs"])
             amt_d  = abs(float(l["Amt"]) - float(r["Amt"]))
             d1, d2 = l["Date"], r["Date"]
@@ -211,7 +211,7 @@ def pair_exact_best(left, right, labelL, labelR, tol, name_thresh=NAME_SIM_THRES
             if i in usedL or j in usedR:
                 continue
             r = right.loc[j]
-            num_ov = len(l["NumRefs"]   & r["NumRefs"])
+            num_ov = len(l["NumRefs"] & r["NumRefs"])
             tok_ov = len(l["AlnumRefs"] & r["AlnumRefs"])
             nm_sim = name_similarity(l["NameRefs"], r["NameRefs"])
             if not (num_ov >= 1 or tok_ov >= 1 or nm_sim >= name_thresh):
@@ -237,6 +237,7 @@ def pair_exact_best(left, right, labelL, labelR, tol, name_thresh=NAME_SIM_THRES
     return match_df, usedL, usedR
 
 # ---------- FAST (same-result) wrapper ----------
+# Pre-filter candidates by amount window BEFORE the same scoring logic.
 def pair_exact_best_fast_same(left, right, labelL, labelR, tol, name_thresh=NAME_SIM_THRESHOLD_DEFAULT):
     right_amt = right["Amt"].astype(float).values
 
@@ -270,9 +271,9 @@ def pair_exact_best_fast_same(left, right, labelL, labelR, tol, name_thresh=NAME
 
         def score(j):
             r = right.loc[j]
-            num_ov = len(l["NumRefs"]   & r["NumRefs"])
+            num_ov = len(l["NumRefs"] & r["NumRefs"])
             aln_ov = len(l["AlnumRefs"] & r["AlnumRefs"])
-            nm_ov  = len(l["NameRefs"]  & r["NameRefs"])
+            nm_ov  = len(l["NameRefs"] & r["NameRefs"])
             nm_sim = name_similarity(l["NameRefs"], r["NameRefs"])
             amt_d  = abs(float(l["Amt"]) - float(r["Amt"]))
             d1, d2 = l["Date"], r["Date"]
@@ -284,7 +285,7 @@ def pair_exact_best_fast_same(left, right, labelL, labelR, tol, name_thresh=NAME
             if i in usedL or j in usedR:
                 continue
             r = right.loc[j]
-            num_ov = len(l["NumRefs"]   & r["NumRefs"])
+            num_ov = len(l["NumRefs"] & r["NumRefs"])
             tok_ov = len(l["AlnumRefs"] & r["AlnumRefs"])
             nm_sim = name_similarity(l["NameRefs"], r["NameRefs"])
             if not (num_ov >= 1 or tok_ov >= 1 or nm_sim >= name_thresh):
@@ -423,12 +424,13 @@ def download_to_temp(url: str) -> str:
 st.title("🔗 BRANCH RECON — Best-overlap Matcher")
 
 with st.sidebar:
+    # Mode selector (Fast = same result, just faster)
     mode = st.radio("Match mode", ["Exact (original)", "Fast (same result)"], index=0, horizontal=False)
     use_fast = mode.startswith("Fast")
 
     our_sheet     = st.text_input("Our book sheet name", value="Our book")
     branch_sheet  = st.text_input("Branch book sheet name (blank = auto)", value="Branch book")
-    st.info("Amount tolerance fixed at ± 5 SAR")  # ← no number_input
+    st.info("Amount tolerance fixed at ± 5 SAR")  # fixed; no number_input for tolerance
     name_thresh   = st.slider("Name-only similarity threshold", 0.0, 1.0, float(NAME_SIM_THRESHOLD_DEFAULT), 0.05)
 
 source = st.radio("Choose input method", ["Upload file", "From URL (Drive/Sheets/OneDrive/SharePoint)"], horizontal=True)

@@ -237,7 +237,6 @@ def pair_exact_best(left, right, labelL, labelR, tol, name_thresh=NAME_SIM_THRES
     return match_df, usedL, usedR
 
 # ---------- FAST (same-result) wrapper ----------
-# Pre-filter candidates by amount window BEFORE the same scoring logic.
 def pair_exact_best_fast_same(left, right, labelL, labelR, tol, name_thresh=NAME_SIM_THRESHOLD_DEFAULT):
     right_amt = right["Amt"].astype(float).values
 
@@ -310,6 +309,80 @@ def pair_exact_best_fast_same(left, right, labelL, labelR, tol, name_thresh=NAME
 
     return match_df, usedL, usedR
 
+# ---------- NEW: Partial matches by refs, amount > tol ----------
+def _build_ref_index(df):
+    idx = {}
+    for j, r in df.iterrows():
+        toks = r["AllRefs"]
+        if not isinstance(toks, set):
+            toks = set() if pd.isna(toks) else set(toks)
+        for tok in toks:
+            idx.setdefault(tok, set()).add(j)
+    return idx
+
+def find_partial_by_refs(left, right, labelL, labelR, tol, name_thresh,
+                         exclude_left: set = None, exclude_right: set = None):
+    """
+    Find best candidate by reference overlap/name similarity where amount diff > tol.
+    Excludes indices already used in exact matches.
+    """
+    exclude_left = exclude_left or set()
+    exclude_right = exclude_right or set()
+
+    ref_index = _build_ref_index(right)
+    partial = []
+    for i, l in left.iterrows():
+        if i in exclude_left:
+            continue
+        toks = l["AllRefs"] if isinstance(l["AllRefs"], set) else set()
+        if not toks:
+            continue
+        cand = set()
+        for tok in toks:
+            cand |= ref_index.get(tok, set())
+        cand = [j for j in cand if j not in exclude_right]
+        if not cand:
+            continue
+
+        def score(j):
+            r = right.loc[j]
+            num_ov = len(l["NumRefs"] & r["NumRefs"])
+            aln_ov = len(l["AlnumRefs"] & r["AlnumRefs"])
+            nm_ov  = len(l["NameRefs"] & r["NameRefs"])
+            nm_sim = name_similarity(l["NameRefs"], r["NameRefs"])
+            amt_d  = abs(float(l["Amt"]) - float(r["Amt"]))
+            d1, d2 = l["Date"], r["Date"]
+            d_d    = abs((d1 - d2).days) if (pd.notna(d1) and pd.notna(d2)) else 10**9
+            # Prefer stronger ref overlaps, then closer amounts/dates (for readability)
+            return (-num_ov, -(aln_ov + nm_ov*0.5), -int(nm_sim*1000), amt_d, d_d)
+
+        cand = sorted(cand, key=score)
+        for j in cand:
+            r = right.loc[j]
+            num_ov = len(l["NumRefs"] & r["NumRefs"])
+            tok_ov = len(l["AlnumRefs"] & r["AlnumRefs"])
+            nm_sim = name_similarity(l["NameRefs"], r["NameRefs"])
+            if not (num_ov >= 1 or tok_ov >= 1 or nm_sim >= name_thresh):
+                continue
+            amt_diff = abs(float(l["Amt"]) - float(r["Amt"]))
+            if amt_diff > tol:
+                partial.append((l, r, round(amt_diff, ROUND_DP)))
+                break  # only best one per left
+
+    partial_df = pd.DataFrame([{
+        f"{labelL} Date":  a["Date"],
+        f"{labelL} Voucher": a["Voucher"],
+        f"{labelL} Description": a["Description"],
+        f"{labelL} Amount": a["Amt"],
+        f"{labelR} Date":  b["Date"],
+        f"{labelR} Voucher": b["Voucher"],
+        f"{labelR} Description": b["Description"],
+        f"{labelR} Amount": b["Amt"],
+        "Amount_Diff": diff
+    } for (a,b,diff) in partial])
+
+    return partial_df
+
 # ---------------------- CORE RUN ----------------------
 def run_recon_core(xls_bytes, our_sheet_name, branch_sheet_name, amount_tol, name_sim_thresh, use_fast=False):
     xls = pd.ExcelFile(xls_bytes)
@@ -344,10 +417,23 @@ def run_recon_core(xls_bytes, our_sheet_name, branch_sheet_name, amount_tol, nam
 
     matcher = pair_exact_best_fast_same if use_fast else pair_exact_best
 
+    # Exact matches within ± tol
     m1, usedL1, usedR1 = matcher(OUR_DR, BR_CR, label_our_dr, label_br_cr, amount_tol, name_sim_thresh)
     m2, usedL2, usedR2 = matcher(OUR_CR, BR_DR, label_our_cr, label_br_dr, amount_tol, name_sim_thresh)
     matching_df = pd.concat([m1, m2], ignore_index=True) if (not m1.empty or not m2.empty) else pd.DataFrame()
 
+    # Partial matches (same refs / name similarity) but amount difference > tol
+    p1 = find_partial_by_refs(
+        OUR_DR, BR_CR, label_our_dr, label_br_cr, amount_tol, name_sim_thresh,
+        exclude_left=usedL1, exclude_right=usedR1
+    )
+    p2 = find_partial_by_refs(
+        OUR_CR, BR_DR, label_our_cr, label_br_dr, amount_tol, name_sim_thresh,
+        exclude_left=usedL2, exclude_right=usedR2
+    )
+    partial_df = pd.concat([p1, p2], ignore_index=True) if (not p1.empty or not p2.empty) else pd.DataFrame()
+
+    # Unmatching (anything not used in exact matches; partials are informative only)
     un_our = pd.concat([
         OUR_DR.loc[[i for i in OUR_DR.index if i not in usedL1]],
         OUR_CR.loc[[i for i in OUR_CR.index if i not in usedL2]],
@@ -363,17 +449,22 @@ def run_recon_core(xls_bytes, our_sheet_name, branch_sheet_name, amount_tol, nam
         un_br[["Which","Date","Voucher","Description","Debit","Credit","Amt"]],
     ], ignore_index=True)
 
+    # Clean date types for display/export
     matching_df   = strip_time_cols(matching_df)
     unmatching_df = strip_time_cols(unmatching_df)
+    partial_df    = strip_time_cols(partial_df)
 
+    # Build Excel output with three sheets
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine="xlsxwriter") as w:
         (matching_df if not matching_df.empty else pd.DataFrame({"Info":["No matches found"]})) \
             .to_excel(w, sheet_name="Matching", index=False)
         (unmatching_df if not unmatching_df.empty else pd.DataFrame({"Info":["No unmatching transactions"]})) \
             .to_excel(w, sheet_name="Unmatching", index=False)
+        (partial_df if not partial_df.empty else pd.DataFrame({"Info":["No partial (ref) mismatches"]})) \
+            .to_excel(w, sheet_name="PartialMatching", index=False)
     out.seek(0)
-    return matching_df, unmatching_df, out
+    return matching_df, unmatching_df, partial_df, out
 
 # --------- CACHED wrapper (speed on repeated runs; identical results) ---------
 @st.cache_data(show_spinner=False)
@@ -458,15 +549,21 @@ if run_btn:
             else:
                 file_bytes = uploaded.read()
 
-            matching_df, unmatching_df, out_xlsx = run_recon_cached(
+            matching_df, unmatching_df, partial_df, out_xlsx = run_recon_cached(
                 file_bytes, our_sheet, branch_sheet, AMOUNT_TOLERANCE_DEFAULT, name_thresh, use_fast
             )
 
         st.success("Done!")
         st.subheader("✅ Matching")
         st.dataframe(matching_df if not matching_df.empty else pd.DataFrame({"Info":["No matches found"]}), use_container_width=True)
+
         st.subheader("❗ Unmatching")
         st.dataframe(unmatching_df if not unmatching_df.empty else pd.DataFrame({"Info":["No unmatching transactions"]}), use_container_width=True)
+
+        st.subheader("🟡 Partial (same refs, amount > 5 SAR)")
+        with st.expander("Show partial reference matches"):
+            st.dataframe(partial_df if not partial_df.empty else pd.DataFrame({"Info":["No partial (ref) mismatches"]}), use_container_width=True)
+
         st.download_button(
             "⬇️ Download Excel result",
             data=out_xlsx.getvalue(),

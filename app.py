@@ -65,7 +65,7 @@ STOP_TOKENS_LATIN = {
     "TOSL","PAYMENT","EXIT","ENTRY","RENEWAL","FEE","CHARGE","BONUS","REWARD","RWD",
     "DTD","BREF","B.REF","INV","FT","TT","CHQ","CHEQUE","SADAD","EXP","ERE","PAY"
 }
-STOP_TOKENS_AR = {"بنك","تحويل","حوالة","ايداع","سداد","رسوم","جدة","الرياض","مبلغ","شركة","رقم","دفع","مدفوع"}
+STOP_TOKENS_AR = {"بنك","تحويل","حوالة","ايداع","سداد","رسوم","جدة","الرياض","মبلغ","شركة","رقم","دفع","مدفوع"}
 
 def to_numeric(x):
     return pd.to_numeric(pd.Series(x).astype(str).str.replace(",", "", regex=False), errors="coerce")
@@ -325,12 +325,16 @@ def find_partial_by_refs(left, right, labelL, labelR, tol, name_thresh,
     """
     Find best candidate by reference overlap/name similarity where amount diff > tol.
     Excludes indices already used in exact matches.
+    Returns: (partial_df, left_used_set, right_used_set)
     """
     exclude_left = exclude_left or set()
     exclude_right = exclude_right or set()
 
     ref_index = _build_ref_index(right)
     partial = []
+    left_used = set()
+    right_used = set()
+
     for i, l in left.iterrows():
         if i in exclude_left:
             continue
@@ -340,7 +344,7 @@ def find_partial_by_refs(left, right, labelL, labelR, tol, name_thresh,
         cand = set()
         for tok in toks:
             cand |= ref_index.get(tok, set())
-        cand = [j for j in cand if j not in exclude_right]
+        cand = [j for j in cand if j not in exclude_right and j not in right_used]
         if not cand:
             continue
 
@@ -353,7 +357,6 @@ def find_partial_by_refs(left, right, labelL, labelR, tol, name_thresh,
             amt_d  = abs(float(l["Amt"]) - float(r["Amt"]))
             d1, d2 = l["Date"], r["Date"]
             d_d    = abs((d1 - d2).days) if (pd.notna(d1) and pd.notna(d2)) else 10**9
-            # Prefer stronger ref overlaps, then closer amounts/dates (for readability)
             return (-num_ov, -(aln_ov + nm_ov*0.5), -int(nm_sim*1000), amt_d, d_d)
 
         cand = sorted(cand, key=score)
@@ -366,7 +369,9 @@ def find_partial_by_refs(left, right, labelL, labelR, tol, name_thresh,
                 continue
             amt_diff = abs(float(l["Amt"]) - float(r["Amt"]))
             if amt_diff > tol:
-                partial.append((l, r, round(amt_diff, ROUND_DP)))
+                partial.append((i, j, l, r, round(amt_diff, ROUND_DP)))
+                left_used.add(i)
+                right_used.add(j)
                 break  # only best one per left
 
     partial_df = pd.DataFrame([{
@@ -379,9 +384,9 @@ def find_partial_by_refs(left, right, labelL, labelR, tol, name_thresh,
         f"{labelR} Description": b["Description"],
         f"{labelR} Amount": b["Amt"],
         "Amount_Diff": diff
-    } for (a,b,diff) in partial])
+    } for (_i,_j,a,b,diff) in partial])
 
-    return partial_df
+    return partial_df, left_used, right_used
 
 # ---------------------- CORE RUN ----------------------
 def run_recon_core(xls_bytes, our_sheet_name, branch_sheet_name, amount_tol, name_sim_thresh, use_fast=False):
@@ -423,24 +428,27 @@ def run_recon_core(xls_bytes, our_sheet_name, branch_sheet_name, amount_tol, nam
     matching_df = pd.concat([m1, m2], ignore_index=True) if (not m1.empty or not m2.empty) else pd.DataFrame()
 
     # Partial matches (same refs / name similarity) but amount difference > tol
-    p1 = find_partial_by_refs(
+    p1, pL1, pR1 = find_partial_by_refs(
         OUR_DR, BR_CR, label_our_dr, label_br_cr, amount_tol, name_sim_thresh,
         exclude_left=usedL1, exclude_right=usedR1
     )
-    p2 = find_partial_by_refs(
+    p2, pL2, pR2 = find_partial_by_refs(
         OUR_CR, BR_DR, label_our_cr, label_br_dr, amount_tol, name_sim_thresh,
         exclude_left=usedL2, exclude_right=usedR2
     )
     partial_df = pd.concat([p1, p2], ignore_index=True) if (not p1.empty or not p2.empty) else pd.DataFrame()
 
-    # Unmatching (anything not used in exact matches; partials are informative only)
+    # Unmatching (exclude exact and partial)
+    usedL_all = (usedL1 | usedL2 | pL1 | pL2)
+    usedR_all = (usedR1 | usedR2 | pR1 | pR2)
+
     un_our = pd.concat([
-        OUR_DR.loc[[i for i in OUR_DR.index if i not in usedL1]],
-        OUR_CR.loc[[i for i in OUR_CR.index if i not in usedL2]],
+        OUR_DR.loc[[i for i in OUR_DR.index if i not in usedL_all]],
+        OUR_CR.loc[[i for i in OUR_CR.index if i not in usedL_all]],
     ], ignore_index=True)
     un_br = pd.concat([
-        BR_DR.loc[[i for i in BR_DR.index if i not in usedR2]],
-        BR_CR.loc[[i for i in BR_CR.index if i not in usedR1]],
+        BR_DR.loc[[i for i in BR_DR.index if i not in usedR_all]],
+        BR_CR.loc[[i for i in BR_CR.index if i not in usedR_all]],
     ], ignore_index=True)
 
     un_our["Which"] = "Our book"; un_br["Which"] = "Branch book"
@@ -470,7 +478,6 @@ def run_recon_core(xls_bytes, our_sheet_name, branch_sheet_name, amount_tol, nam
 @st.cache_data(show_spinner=False)
 def run_recon_cached_v2(file_bytes: bytes, our_sheet_name, branch_sheet_name, amount_tol, name_sim_thresh, use_fast, _version: str = "v2"):
     buf = io.BytesIO(file_bytes)
-    # returns: matching_df, unmatching_df, partial_df, out
     return run_recon_core(buf, our_sheet_name, branch_sheet_name, amount_tol, name_sim_thresh, use_fast)
 
 # ---------- URL download helpers ----------
@@ -516,13 +523,12 @@ def download_to_temp(url: str) -> str:
 st.title("🔗 BRANCH RECON — Best-overlap Matcher")
 
 with st.sidebar:
-    # Mode selector (Fast = same result, just faster)
     mode = st.radio("Match mode", ["Exact (original)", "Fast (same result)"], index=0, horizontal=False)
     use_fast = mode.startswith("Fast")
 
     our_sheet     = st.text_input("Our book sheet name", value="Our book")
     branch_sheet  = st.text_input("Branch book sheet name (blank = auto)", value="Branch book")
-    st.info("Amount tolerance fixed at ± 5 SAR")  # fixed; no number_input for tolerance
+    st.info("Amount tolerance fixed at ± 5 SAR")
     name_thresh   = st.slider("Name-only similarity threshold", 0.0, 1.0, float(NAME_SIM_THRESHOLD_DEFAULT), 0.05)
 
     st.divider()
@@ -555,14 +561,12 @@ if run_btn:
             else:
                 file_bytes = uploaded.read()
 
-            # Use v2 cache wrapper; backward-compat fallback if old cache returns 3 values
             res = run_recon_cached_v2(
                 file_bytes, our_sheet, branch_sheet, AMOUNT_TOLERANCE_DEFAULT, name_thresh, use_fast, _version="v2"
             )
             if isinstance(res, tuple) and len(res) == 4:
                 matching_df, unmatching_df, partial_df, out_xlsx = res
             else:
-                # legacy (3-value) cache fallback
                 matching_df, unmatching_df, out_xlsx = res
                 partial_df = pd.DataFrame({"Info": ["No partial (ref) mismatches"]})
 

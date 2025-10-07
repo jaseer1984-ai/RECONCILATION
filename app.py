@@ -466,10 +466,11 @@ def run_recon_core(xls_bytes, our_sheet_name, branch_sheet_name, amount_tol, nam
     out.seek(0)
     return matching_df, unmatching_df, partial_df, out
 
-# --------- CACHED wrapper (speed on repeated runs; identical results) ---------
+# --------- CACHED wrapper (returns 4 values) ---------
 @st.cache_data(show_spinner=False)
-def run_recon_cached(file_bytes: bytes, our_sheet_name, branch_sheet_name, amount_tol, name_sim_thresh, use_fast):
+def run_recon_cached_v2(file_bytes: bytes, our_sheet_name, branch_sheet_name, amount_tol, name_sim_thresh, use_fast, _version: str = "v2"):
     buf = io.BytesIO(file_bytes)
+    # returns: matching_df, unmatching_df, partial_df, out
     return run_recon_core(buf, our_sheet_name, branch_sheet_name, amount_tol, name_sim_thresh, use_fast)
 
 # ---------- URL download helpers ----------
@@ -524,6 +525,11 @@ with st.sidebar:
     st.info("Amount tolerance fixed at ± 5 SAR")  # fixed; no number_input for tolerance
     name_thresh   = st.slider("Name-only similarity threshold", 0.0, 1.0, float(NAME_SIM_THRESHOLD_DEFAULT), 0.05)
 
+    st.divider()
+    if st.button("♻️ Clear cache"):
+        st.cache_data.clear()
+        st.success("Cache cleared.")
+
 source = st.radio("Choose input method", ["Upload file", "From URL (Drive/Sheets/OneDrive/SharePoint)"], horizontal=True)
 
 uploaded = None
@@ -549,9 +555,16 @@ if run_btn:
             else:
                 file_bytes = uploaded.read()
 
-            matching_df, unmatching_df, partial_df, out_xlsx = run_recon_cached(
-                file_bytes, our_sheet, branch_sheet, AMOUNT_TOLERANCE_DEFAULT, name_thresh, use_fast
+            # Use v2 cache wrapper; backward-compat fallback if old cache returns 3 values
+            res = run_recon_cached_v2(
+                file_bytes, our_sheet, branch_sheet, AMOUNT_TOLERANCE_DEFAULT, name_thresh, use_fast, _version="v2"
             )
+            if isinstance(res, tuple) and len(res) == 4:
+                matching_df, unmatching_df, partial_df, out_xlsx = res
+            else:
+                # legacy (3-value) cache fallback
+                matching_df, unmatching_df, out_xlsx = res
+                partial_df = pd.DataFrame({"Info": ["No partial (ref) mismatches"]})
 
         st.success("Done!")
         st.subheader("✅ Matching")
@@ -561,7 +574,7 @@ if run_btn:
         st.dataframe(unmatching_df if not unmatching_df.empty else pd.DataFrame({"Info":["No unmatching transactions"]}), use_container_width=True)
 
         st.subheader("🟡 Partial (same refs, amount > 5 SAR)")
-        with st.expander("Show partial reference matches"):
+        with st.expander("Show partial reference matches", expanded=False):
             st.dataframe(partial_df if not partial_df.empty else pd.DataFrame({"Info":["No partial (ref) mismatches"]}), use_container_width=True)
 
         st.download_button(
